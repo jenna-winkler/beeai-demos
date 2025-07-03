@@ -57,9 +57,7 @@ class TrajectoryCapture:
             )
         ),
         author={
-            "name": "Jenna Winkler",
-            "email": "test@example.com",
-            "url": "https://johndoe.dev"
+            "name": "Jenna Winkler"
         },
         recommended_models=[
             "granite3.3:8b-beeai"
