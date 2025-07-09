@@ -202,7 +202,7 @@ async def chat_agent(input: list[Message], context: Context) -> AsyncGenerator:
                     tool_name = "Wikipedia"  
                 elif "OpenMeteoTool" in step:
                     tool_name = "Weather"
-                elif "DuckDuckGoSearchTool" in step:
+                elif "TrackedDuckDuckGoTool" in step or "DuckDuckGoSearchTool" in step:
                     tool_name = "DuckDuckGo"
                     
                 yield MessagePart(metadata=TrajectoryMetadata(
