@@ -183,17 +183,17 @@ async def travel_guide(input: list[Message], context: Context) -> AsyncGenerator
                 ),
                 ConditionalRequirement(
                     tracked_wikipedia,
-                    max_invocations=2,
+                    max_invocations=1,
                     consecutive_allowed=False
                 ),
                 ConditionalRequirement(
                     tracked_weather,
-                    max_invocations=2,
+                    max_invocations=1,
                     consecutive_allowed=False
                 ),
                 ConditionalRequirement(
                     tracked_duckduckgo,
-                    max_invocations=3, 
+                    max_invocations=1, 
                     consecutive_allowed=False
                 )
             ],
@@ -250,7 +250,7 @@ async def travel_guide(input: list[Message], context: Context) -> AsyncGenerator
                     tool_name = "Wikipedia"  
                 elif "OpenMeteoTool" in step:
                     tool_name = "Weather"
-                elif "DuckDuckGoSearchTool" in step:
+                elif "DuckDuckGo" in step:
                     tool_name = "DuckDuckGo"
                     
                 yield MessagePart(metadata=TrajectoryMetadata(
@@ -261,13 +261,18 @@ async def travel_guide(input: list[Message], context: Context) -> AsyncGenerator
         yield MessagePart(content=response_text)
         
         citation_count = 0
+        total_citations = 0
+
         for tool_name, tool_output in tool_tracker.results:
-            if citation_count >= 10: 
+            if total_citations >= 10:  # Global limit
                 break
-                
+            
+            tool_citation_count = 0  # Track citations per tool
+            max_citations_per_tool = 2  # Limit each tool to 2 citations
+            
             if tool_name == 'Wikipedia' and hasattr(tool_output, 'results') and tool_output.results:
                 for result in tool_output.results:
-                    if citation_count >= 10:
+                    if tool_citation_count >= max_citations_per_tool or total_citations >= 10:
                         break
                     title_words = result.title.split()
                     for word in title_words:
@@ -283,12 +288,13 @@ async def travel_guide(input: list[Message], context: Context) -> AsyncGenerator
                                         end_index=start_idx + len(word)
                                     )
                                 )
-                                citation_count += 1
+                                tool_citation_count += 1
+                                total_citations += 1
                                 break
                                 
             elif tool_name == 'DuckDuckGo' and hasattr(tool_output, 'results') and tool_output.results:
                 for result in tool_output.results:
-                    if citation_count >= 10:
+                    if tool_citation_count >= max_citations_per_tool or total_citations >= 10:
                         break
                     title_words = result.title.split()
                     for word in title_words:
@@ -304,13 +310,16 @@ async def travel_guide(input: list[Message], context: Context) -> AsyncGenerator
                                         end_index=start_idx + len(word)
                                     )
                                 )
-                                citation_count += 1
+                                tool_citation_count += 1
+                                total_citations += 1
                                 break
                                 
             elif tool_name == 'OpenMeteo':
+                if tool_citation_count >= max_citations_per_tool or total_citations >= 10:
+                    continue
                 weather_words = ["weather", "temperature", "warm", "cool", "forecast", "conditions", "climate", "rain", "sunny", "cloudy"]
                 for word in weather_words:
-                    if citation_count >= 10:
+                    if tool_citation_count >= max_citations_per_tool or total_citations >= 10:
                         break
                     if word in response_text.lower():
                         start_idx = response_text.lower().find(word)
@@ -323,7 +332,8 @@ async def travel_guide(input: list[Message], context: Context) -> AsyncGenerator
                                 end_index=start_idx + len(word)
                             )
                         )
-                        citation_count += 1
+                        tool_citation_count += 1
+                        total_citations += 1
                         break
         
         yield MessagePart(metadata=TrajectoryMetadata(
