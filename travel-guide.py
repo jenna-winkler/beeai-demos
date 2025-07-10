@@ -1,6 +1,3 @@
-# Copyright 2025 © BeeAI a Series of LF Projects, LLC
-# SPDX-License-Identifier: Apache-2.0
-
 import os
 from collections.abc import AsyncGenerator
 
@@ -12,7 +9,10 @@ from acp_sdk.server import Context, Server
 
 from beeai_framework.agents.experimental import RequirementAgent
 from beeai_framework.agents.experimental.requirements.conditional import ConditionalRequirement
+from beeai_framework.agents.types import AgentExecutionConfig
 from beeai_framework.backend import ChatModel
+from beeai_framework.backend.message import UserMessage, AssistantMessage
+from beeai_framework.memory import UnconstrainedMemory
 from beeai_framework.middleware.trajectory import GlobalTrajectoryMiddleware
 from beeai_framework.tools import Tool
 from beeai_framework.tools.search.duckduckgo import DuckDuckGoSearchTool
@@ -21,6 +21,8 @@ from beeai_framework.tools.think import ThinkTool
 from beeai_framework.tools.weather import OpenMeteoTool
 
 server = Server()
+
+conversation_memories = {}
 
 
 class TrajectoryCapture:
@@ -79,6 +81,21 @@ class TrackedOpenMeteoTool(OpenMeteoTool):
         return result
 
 
+def get_session_id(context: Context) -> str:
+    """Extract session ID from context, fallback to default if not available"""
+    session_id = getattr(context, 'session_id', None)
+    if not session_id:
+        session_id = getattr(context, 'headers', {}).get('session-id', 'default')
+    return str(session_id)
+
+
+def get_or_create_memory(session_id: str) -> UnconstrainedMemory:
+    """Get existing memory for session or create new one"""
+    if session_id not in conversation_memories:
+        conversation_memories[session_id] = UnconstrainedMemory()
+    return conversation_memories[session_id]
+
+
 @server.agent(
     name="travel_guide",
     description="Comprehensive travel guide agent that provides personalized recommendations with weather, local information, and current search results. Features dynamic citations and trajectory tracking.",
@@ -129,25 +146,27 @@ async def travel_guide(input: list[Message], context: Context) -> AsyncGenerator
     """
     
     user_message = input[-1].parts[0].content if input else "Hello"
+    session_id = get_session_id(context)
     
-    # Initialize tracking systems
     tool_tracker = TrackedTool("travel_guide")
     trajectory = TrajectoryCapture()
     
-    # Show we're starting
+    session_memory = get_or_create_memory(session_id)
+    
     yield MessagePart(metadata=TrajectoryMetadata(
         message=f"🌍 Travel Guide processing: '{user_message}'"
     ))
     
     try:
-        # Create tracked tools
+        await session_memory.add(UserMessage(user_message))
+        
         tracked_duckduckgo = TrackedDuckDuckGoTool(tool_tracker)
         tracked_wikipedia = TrackedWikipediaTool(tool_tracker)
         tracked_weather = TrackedOpenMeteoTool(tool_tracker)
         
-        # Create agent with comprehensive travel planning instructions
         agent = RequirementAgent(
             llm=ChatModel.from_name("ollama:granite3.3:8b"),
+            memory=session_memory,  
             tools=[
                 ThinkTool(), 
                 tracked_wikipedia, 
@@ -159,39 +178,69 @@ async def travel_guide(input: list[Message], context: Context) -> AsyncGenerator
                     ThinkTool, 
                     force_at_step=1, 
                     force_after=Tool, 
+                    consecutive_allowed=False,
+                    max_invocations=3 
+                ),
+                ConditionalRequirement(
+                    tracked_wikipedia,
+                    max_invocations=2,
+                    consecutive_allowed=False
+                ),
+                ConditionalRequirement(
+                    tracked_weather,
+                    max_invocations=2,
+                    consecutive_allowed=False
+                ),
+                ConditionalRequirement(
+                    tracked_duckduckgo,
+                    max_invocations=3, 
                     consecutive_allowed=False
                 )
             ],
             instructions="""You are a comprehensive travel guide assistant. Your goal is to provide helpful, accurate, and personalized travel recommendations.
 
-            For any travel-related query:
+            IMPORTANT WORKFLOW:
+            1. Think about the user's request first
+            2. Gather information efficiently using tools (don't repeat searches unnecessarily)
+            3. Provide a comprehensive final answer based on the information gathered
+
+            For travel planning queries:
             1. First, think about what information would be most helpful
-            2. Use Wikipedia for destination background, history, and general information
-            3. Use OpenMeteo for current weather conditions and forecasts
-            4. Use DuckDuckGo for current restaurant recommendations, events, hotels, and real-time information
+            2. Use Wikipedia for destination background, history, and general information (search once per destination)
+            3. Use OpenMeteo for current weather conditions and forecasts (search once per location)
+            4. Use DuckDuckGo for current restaurant recommendations, events, hotels, and real-time information (be specific in searches)
             
-            Always provide:
+            Always provide in your final answer:
             - Practical travel advice
             - Local insights and cultural tips
             - Weather-appropriate recommendations
             - Current and up-to-date information
             - Personalized suggestions based on user preferences
             
-            Be conversational, helpful, and enthusiastic about travel while providing accurate information."""
+            Be conversational, helpful, and enthusiastic about travel while providing accurate information. 
+            
+            CRITICAL: Once you have gathered sufficient information, provide your comprehensive final answer. Do not continue searching unnecessarily."""
         )
         
         yield MessagePart(metadata=TrajectoryMetadata(
-            message="🛠️ Travel Guide initialized with Think, Wikipedia, Weather, and Search tools"
+            message=f"🛠️ Travel Guide initialized with Think, Wikipedia, Weather, and Search tools"
         ))
         
-        # Run agent with trajectory middleware
-        response = await agent.run(user_message).middleware(
+        response = await agent.run(
+            user_message,
+            execution=AgentExecutionConfig(
+                max_iterations=10,  
+                max_retries_per_step=2, 
+                total_max_retries=5 
+            )
+        ).middleware(
             GlobalTrajectoryMiddleware(target=trajectory, included=[Tool])
         )
         
         response_text = response.answer.text
         
-        # Show trajectory steps
+        await session_memory.add(AssistantMessage(response_text))
+        
         for i, step in enumerate(trajectory.steps):
             if step.strip():
                 tool_name = None
@@ -209,20 +258,17 @@ async def travel_guide(input: list[Message], context: Context) -> AsyncGenerator
                     tool_name=tool_name
                 ))
         
-        # Generate main response
         yield MessagePart(content=response_text)
         
-        # Generate dynamic citations based on tool usage
         citation_count = 0
         for tool_name, tool_output in tool_tracker.results:
-            if citation_count >= 10:  # Limit citations to avoid overwhelming
+            if citation_count >= 10: 
                 break
                 
             if tool_name == 'Wikipedia' and hasattr(tool_output, 'results') and tool_output.results:
                 for result in tool_output.results:
                     if citation_count >= 10:
                         break
-                    # Find specific text to cite inline
                     title_words = result.title.split()
                     for word in title_words:
                         if word.lower() in response_text.lower() and len(word) > 3:
@@ -244,7 +290,6 @@ async def travel_guide(input: list[Message], context: Context) -> AsyncGenerator
                 for result in tool_output.results:
                     if citation_count >= 10:
                         break
-                    # Find restaurant names, hotel names, or key terms in the response
                     title_words = result.title.split()
                     for word in title_words:
                         if word.lower() in response_text.lower() and len(word) > 4:
@@ -263,7 +308,6 @@ async def travel_guide(input: list[Message], context: Context) -> AsyncGenerator
                                 break
                                 
             elif tool_name == 'OpenMeteo':
-                # Find weather-related words to cite
                 weather_words = ["weather", "temperature", "warm", "cool", "forecast", "conditions", "climate", "rain", "sunny", "cloudy"]
                 for word in weather_words:
                     if citation_count >= 10:
